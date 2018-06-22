@@ -27,7 +27,7 @@
 
 APPNAME=$(basename $0)
 VERSION="0.5"
-COMMUNITY="olpublic"
+COMMUNITY="public"
 
 EXIT_CODE_OK=0
 EXIT_CODE_WARN=1
