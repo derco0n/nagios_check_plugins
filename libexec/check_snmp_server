@@ -1,0 +1,554 @@
+#!/bin/bash
+#########################################################
+#														#
+#		SNMP Server Check								#
+#														#
+# check_snmp_server										#
+# 	Version 0.5 (June 22, 2018)							#
+#		by D.Marx										#
+#														#
+#	kleines Tool um Server per SNMP abzufragen			#
+#														#
+#														#
+#														#
+#														#
+#														#
+#########################################################
+##		     GLOBAL VARIABLES			      			##
+#########################################################
+
+# Help BASH-Arrays
+# ${arr[*]}         # All of the items in the array
+# ${!arr[*]}        # All of the indexes in the array
+# ${#arr[*]}        # Number of items in the array
+# ${#arr[0]}        # Length of item zero
+
+
+
+APPNAME=$(basename $0)
+VERSION="0.5"
+COMMUNITY="olpublic"
+
+EXIT_CODE_OK=0
+EXIT_CODE_WARN=1
+EXIT_CODE_CRIT=2
+EXIT_CODE_UNKNOWN=3
+
+EXIT_CODE=$EXIT_CODE_OK
+
+LAST_RETURN_VALUE=0
+
+EXIT_STRING=""
+
+STRING_TYPE=""
+PERFDAT=""
+CHECK=""
+PARAMETER=""
+
+WARNING=20
+
+CRITICAL=5
+
+SEPARATOR=" "
+
+ARG_TOKEN=","
+
+
+#########################################################
+##		    print_help Function		       				##
+#########################################################
+# Prints out user help and gives examples of proper		#
+# plugin usage											#
+#########################################################
+
+function print_help {
+	printf "check_snmp_server - Help: \n"
+	printf "========================== \n\n"
+	printf "Usage: \n"
+	printf "check_snmp_server -H <HOST/IP> -C <COMMUNITY> -x <CHECK> [<PARAMETER>] [-w <WARNING> -c <CRITICAL>] \n\n"
+	printf "OPTIONS: \n"
+	printf "======== \n"
+	printf "CPULOAD 				- returns CPU-Usage averange over all cores\n"
+	printf "RAMFREEPERCENT			- returns Free RAM in Percent\n"
+	printf "RAMFREE					- returns Free RAM in MBytes\n"
+	printf "\"DISKFREE <DRIVE>\" 	- returns Free Diskspace in Percent\n"
+	printf "							Example: check_snmp_server -H 192.168.0.1 -C public -x \"DISKFREE C:\""
+	printf "\n"
+return $EXIT_CODE_UNKNOWN
+}
+
+function absolutetopercent(){
+	#ARG1($1)=$Total
+	#ARG2($2)=$partial
+	CALC1=$(echo "scale=10; 100 / $1" | bc) 
+	CALC2=$(echo "scale=10; $CALC1 * $2" | bc ) 
+	#PERCENT=$(echo "scale=10; 100 - $CALC2" | bc )
+	CLEANED=$(echo "$CALC2 /1" | bc )
+	LAST_RETURN_VALUE=$CLEANED
+	}
+
+
+function check_diskfree(){
+	#
+	#$ARG1($1)=$driveletter
+	#Ablauf:
+		# description:				.1.3.6.1.2.1.25.2.3.1.3
+		# Laufwerk filtern -> index finden
+	
+		#clustersize ermitteln:				.1.3.6.1.2.1.25.2.3.1.4<.index>
+		#total clusters ermitteln:			.1.3.6.1.2.1.25.2.3.1.5<.index>
+		#used clusters ermitteln:			.1.3.6.1.2.1.25.2.3.1.6<.index>		
+		
+		#Freien Speicher berechnen:
+			#(total clusters * clustersize) - (used cluster * clustersize)
+
+	#Step 1: Laufwerk filtern -> index finden
+	driveletter=$1 #Zu suchender Laufwerksbuchstabe
+			
+	#declare -a DRIVENAMES
+	# DRIVENAMES=( $(snmpwalk -v2c -Ovq -c $COMMUNITY $HOST_NAME .1.3.6.1.2.1.25.2.3.1.3 2>/dev/null | tr -d "\"" ) ) #Alle Laufwerksbezeichnungen 
+	
+	# DISKCOUNT=0
+	# DISKCOUNT=${#DRIVENAMES[*]}
+
+	
+	OID=$(snmpwalk -v2c -Onq -c $COMMUNITY $HOST_NAME .1.3.6.1.2.1.25.2.3.1.3 2/dev/null | grep $driveletter | cut -d " " -f1)
+	INDEX=${OID: -1}
+	
+	#DEBUG
+	#echo "DRIVE $driveletter"
+	#echo "OID $OID"
+	#echo "INDEX $INDEX"
+	#DEBUG ENDE
+	
+	#if [ $DISKCOUNT -lt 1 ]; then
+	if [ ${#INDEX} -lt 1 ]; then #INDEX-Länge < 1 Zeichen
+	   EXIT_STRING="UNKNOWN - Disk $driveletter not found."
+	   return $EXIT_CODE_UNKNOWN
+	fi
+	
+	#Alle gefundenen Laufwerksbzeichnungen durchiterieren
+	# INDEX=0
+	# DRIVEFOUND=false
+	# until [  $INDEX -ge $DISKCOUNT ]; do		
+		# echo ${DRIVENAMES[$INDEX]} #DEBUG
+		# if [[ ${DRIVENAMES[$INDEX]} = "$driveletter"* ]]; then
+			# #Index des Laufwerksbuchstaben gefunden
+			# echo "Drive found - Index is: $INDEX" #DEBUG
+			# DRIVEFOUND=true
+			# break #Schleife unterbrechen
+		# fi
+		
+		# let INDEX+=1
+	# done	
+	
+	# #Prüfen ob ein gültiger index gefunden wurde
+	# if [ "$DRIVEFOUND" = false ]; then
+		# EXIT_STRING="Specified Driveletter ($driveletter) not found."
+		# return $EXIT_CODE_UNKNOWN
+	# fi
+	
+	#...wenn der gesuchte Laufwerksbuchstabe gefunden wurde, haben wir jetzt den Index dazu
+	
+	#Step 2: Clustersize (Bytes pro Cluster) des Laufwerksermitteln
+	newOID=".1.3.6.1.2.1.25.2.3.1.4.$INDEX" #Clustersize des Laufwerks...
+	#echo "OID-Clustersize: $newOID" #DEBUG
+	
+	CLUSTERSIZE=$(snmpget -v2c -Ovq -c $COMMUNITY $HOST_NAME $newOID 2>/dev/null | tr -d "\"" | tr -d "Bytes" )
+	if [ $? -ne 0 ]; then
+		EXIT_STRING="UNKNOWN - does not appear to support using this OID. Clustersize unknown."
+		return $EXIT_CODE_UNKNOWN
+	fi
+	
+	#Step 3: Gesamtanzahl der Cluster des Laufwerks ermitteln
+	newOID=".1.3.6.1.2.1.25.2.3.1.5.$INDEX" # Gesamtanzahl aller Cluster des Laufwerks
+	#echo "OID-ClustersTotal: $newOID" #DEBUG
+	TOTALCLUSTERS=$(snmpget -v2c -Ovq -c $COMMUNITY $HOST_NAME $newOID 2>/dev/null | tr -d "\"" )
+	if [ $? -ne 0 ]; then
+		EXIT_STRING="UNKNOWN - does not appear to support using this OID. Total clusters unknown."
+		return $EXIT_CODE_UNKNOWN
+	fi
+	
+	#Step 4: Anzahl der belegten Cluster des Laufwerks ermitteln
+	newOID=".1.3.6.1.2.1.25.2.3.1.6.$INDEX" # Gesamtanzahl aller Cluster des Laufwerks
+	#echo "OID-ClusterUsed: $newOID" #DEBUG
+	USEDCLUSTERS=$(snmpget -v2c -Ovq -c $COMMUNITY $HOST_NAME $newOID 2>/dev/null | tr -d "\"" )
+	if [ $? -ne 0 ]; then
+		EXIT_STRING="UNKNOWN - does not appear to support using this OID. Used clusters unknown."
+		return $EXIT_CODE_UNKNOWN
+	fi
+	
+	#echo "TOTALC: $TOTALCLUSTERS" #DEBUG
+	#echo "USEDC: $USEDCLUSTERS" #DEBUG
+	
+	if [[ $TOTALCLUSTERS -le 0 ]]; then #"|| $USEDCLUSTERS -le 0" abzufragen ist sinnfrei, da dass Laufwerk leer sein könnte...
+		EXIT_STRING="UNKNOWN - Device returns invalid total clusters. Possibly the drive is not ready or it is an empty removeable media (e.g. DVD)."
+		return $EXIT_CODE_UNKNOWN	
+	fi
+	
+	#echo "Step 5" #DEBUG	
+	#Step 5: Platz berechnen
+	FREECLUSTERS=$(( $TOTALCLUSTERS - $USEDCLUSTERS)) #Freie Cluster
+	#echo "FREEC: $FREECLUSTERS" #DEBUG
+	#echo "CSIZE: $CLUSTERSIZE" #DEBUG
+	
+	FREEBYTES=$(( $FREECLUSTERS * $CLUSTERSIZE )) #Freie Bytes berechnen
+	#echo "FREEB: $FREEBYTES" #DEBUG
+	FREEGBYTES=$(echo "scale=10; $FREEBYTES / 1024 / 1024 / 1024" | bc) #Freie Bytes in GBytes umrechnen
+	#echo "FREEGB: $FREEGBYTES" #DEBUG
+	FREEGBYTES=$(echo "scale=2; $FREEGBYTES / 1" | bc) #Nachkommastellen der freien GBytes begrenzen
+	#echo "FREEGB: $FREEGBYTES" #DEBUG
+
+	#echo "Step 6" #DEBUG	
+	#Step 6: Prozentualen freien Platz berechnen
+	absolutetopercent $TOTALCLUSTERS $FREECLUSTERS
+	FREEPERCENT=$LAST_RETURN_VALUE
+	
+	#Alternativ prozentual belegten Platz berechnen
+	#absolutetopercent $TOTALCLUSTERS $USEDCLUSTERS
+	#$USEDPERCENT=$LAST_RETURN_VALUE
+	
+	#echo "Step 7" #DEBUG
+	
+	#Step 7: Auswerten
+	if [ $FREEPERCENT -le $CRITICAL ]; then
+		EXIT_STRING=$(echo "Drive $driveletter Critical (<= $CRITICAL) - Current value: $FREEPERCENT% ($FREEGBYTES GiB)")
+		return $EXIT_CODE_CRIT
+	else
+		if [ $FREEPERCENT -le $WARNING ]; then
+			EXIT_STRING=$(echo "Drive $driveletter Warning (<= $WARNING) - Current value: $FREEPERCENT% ($FREEGBYTES GiB)")
+			return $EXIT_CODE_WARN
+		else
+			EXIT_STRING=$(echo "Drive $driveletter OK - Current value: $FREEPERCENT% ($FREEGBYTES GiB)")
+			return $EXIT_CODE_OK
+		fi
+	fi	
+}
+
+
+function check_ramtotal(){
+	#Ermittelt die Größe des verfügbaren Arbeitsspeichers im MB
+	#OID .1.3.6.1.2.1.25.2.2.0
+	# Module 	HOST-RESOURCES-MIB (ietf)
+	# Nom	hrMemorySize
+	# Acces	readonly
+	# Status	current
+	# Description	The amount of physical read-write main memory, typically RAM, contained by the host.
+	# Unite	KBytes
+	# Syntaxe	KBytes (HOST-RESOURCES-MIB)
+	
+	#DEBUG
+	#echo "COM: " $COMMUNITY
+	#echo "HOST: " $HOSTNAME
+	#DEBUG ENDE
+	
+	RAMTOTALKIB=$(snmpget -v2c -Ovq -c $COMMUNITY $HOST_NAME .1.3.6.1.2.1.25.2.2.0 2>/dev/null | tr -d "\"" | tr -d "KBytes" )
+	
+	if [ $? -eq 0 ]; then		
+		#echo "Total:" $RAMTOTALKIB #DEBUG
+		#RAMTOTALMB="scale=2 ; $RAMTOTALKB / 1024" | bc
+		#echo "Total:" $RAMTOTALKB #DEBUG
+		LAST_RETURN_VALUE=$RAMTOTALKIB	
+	else
+		# Something happened or this OID isn't available		
+		LAST_RETURN_VALUE=-1
+	fi
+}
+
+function check_ramused(){
+	#Ermittelt die Größe des benutzten Arbeitsspeichers im MB
+	#OID .1.3.6.1.2.1.25.5.1.1.2
+	# Module 	HOST-RESOURCES-MIB (ietf)
+	# Nom	hrSWRunPerfMem
+	# Acces	readonly
+	# Status	current
+	# Description	The total amount of real system memory allocated to this process.
+	# Unite	KBytes
+	# Syntaxe	KBytes (HOST-RESOURCES-MIB)
+	declare -a PROCESSUSAGE
+	
+	#Eine Liste aller laufenden Prozesse mit ihrem jeweiligen RAM-Verbrauch holen
+	PROCESSUSAGE=( $(snmpwalk -v2c -Ovq -c $COMMUNITY $HOST_NAME .1.3.6.1.2.1.25.5.1.1.2 2>/dev/null | tr -d "\"" | tr -d "KBytes" ) )
+	TOTALKBUSAGE=0
+	
+	PROCCOUNT=0
+	PROCCOUNT=${#PROCESSUSAGE[*]}
+	COUNTER=0
+	#echo "Proc's:" $PROCCOUNT #DEBUG
+	#Die jeweiligen RAM-Verbräuche der einzelnen Prozesse aufsummieren
+	until [  $COUNTER -ge $PROCCOUNT ]; do
+		ADD=${PROCESSUSAGE[$COUNTER]}		
+		TOTALKBUSAGE=$(($TOTALKBUSAGE + $ADD))		
+		let COUNTER+=1
+	done	
+		
+	if [ $? -eq 0 ]; then	
+		
+		#RAMUSEDMB="scale=2 ; $TOTALKBUSAGE / 1024" | bc
+		#echo "Used:" $TOTALKBUSAGE #DEBUG
+		#return $RAMUSEDMB
+		LAST_RETURN_VALUE=$TOTALKBUSAGE
+	
+	else
+		# Something happened or this OID isn't available		
+		LAST_RETURN_VALUE=-1
+	fi
+}
+
+function check_ramfreemb(){
+	#Ermittelt die Größe des freien Arbeitsspeichers im MB
+	check_ramtotal
+	RAMINSTALLED=$LAST_RETURN_VALUE #gesamt Speicher ermitteln	
+	#echo "LRV: " $LAST_RETURN_VALUE #DEBUG
+	
+	check_ramused	
+	RAMINUSE=$LAST_RETURN_VALUE #belegten Speicher ermitteln	
+	#echo "LRV: " $LAST_RETURN_VALUE #DEBUG
+	
+	if [ $RAMINSTALLED -lt 0 ]; then		
+		EXIT_STRING="UNKNOWN - does not appear to support using this OID. RAM installed unknown."
+		return $EXIT_CODE_UNKNOWN	
+	fi
+	
+	if [ $RAMINUSE -lt 0 ]; then		
+		EXIT_STRING="UNKNOWN - does not appear to support using this OID. RAM used unknown."
+		return $EXIT_CODE_UNKNOWN
+	fi	
+		
+	RAMFREE=$(($RAMINSTALLED - $RAMINUSE)) #Freien RAM berechnen
+	
+	#DEBUG
+	#echo "RAM-TOTAL: " $RAMINSTALLED
+	#echo "RAM-USED : " $RAMINUSE
+	#echo "RAM-FREE : " $RAMFREE
+	#DEBUG ENDE
+	
+	RAMFREE=$(($RAMFREE / 1024)) #Wert in MiB umrechnen
+	
+	#echo "RAM-FREE : " $RAMFREE #DEBUG
+		
+	if [ $RAMFREE -le $CRITICAL ]; then
+		EXIT_STRING=$(echo "Critical (C: <= $CRITICAL MiB) - Current value: $RAMFREE MiB")
+		return $EXIT_CODE_CRIT
+	else
+		if [ $RAMFREE -le $WARNING ]; then
+			EXIT_STRING=$(echo "Warning (W: <= $WARNING MiB) - Current value: $RAMFREE MiB")
+			return $EXIT_CODE_WARN
+		else
+			EXIT_STRING=$(echo "OK (W: <= $WARNING MiB - C: <= $CRITICAL MiB) - Current value: $RAMFREE MiB")
+			return $EXIT_CODE_OK
+		fi
+	fi	
+}
+
+function check_ramfreeperc(){
+	#Ermittelt die Größe des freien Arbeitsspeichers im Prozent
+	check_ramtotal
+	RAMINSTALLED=$LAST_RETURN_VALUE #gesamt Speicher ermitteln	
+	#echo "LRV: " $LAST_RETURN_VALUE #DEBUG
+	
+	check_ramused	
+	RAMINUSE=$LAST_RETURN_VALUE #belegten Speicher ermitteln	
+	#echo "LRV: " $LAST_RETURN_VALUE #DEBUG
+	
+	if [ $RAMINSTALLED -lt 0 ]; then		
+		EXIT_STRING="UNKNOWN - does not appear to support using this OID. RAM installed unknown."
+		return $EXIT_CODE_UNKNOWN	
+	fi
+	
+	if [ $RAMINUSE -lt 0 ]; then		
+		EXIT_STRING="UNKNOWN - does not appear to support using this OID. RAM used unknown."
+		return $EXIT_CODE_UNKNOWN
+	fi	
+	
+	RAMFREE=$(echo "scale=10; $RAMINSTALLED-$RAMINUSE" | bc ) 
+	absolutetopercent $RAMINSTALLED $RAMFREE #Freien RAM in Prozent berechnen
+	CLEANED=$LAST_RETURN_VALUE
+						
+	if [ $CLEANED -le $CRITICAL ]; then
+		EXIT_STRING=$(echo "Critical (C: <= $CRITICAL %) - Current value: $CLEANED %")
+		return $EXIT_CODE_CRIT
+	else
+		if [ $CLEANED -le $WARNING ]; then
+			EXIT_STRING=$(echo "Warning (W: <= $WARNING %) - Current value: $CLEANED %")
+			return $EXIT_CODE_WARN
+		else
+			EXIT_STRING=$(echo "OK (W: <= $WARNING % - C: <= $CRITICAL %) - Current value: $CLEANED %")
+			return $EXIT_CODE_OK
+		fi
+	fi	
+}
+
+function check_cpuload(){
+#Ermittelt die durchschnittliche CPU-Last aller Kerne innerhalb der letzten Minute
+# OID .1.3.6.1.2.1.25.3.3.1.2
+# Module 	HOST-RESOURCES-MIB (ietf)
+# Nom	hrProcessorLoad
+# Acces	readonly
+# Status	current
+# Description	The average, over the last minute, of the percentage of time that this processor was not idle. Implementations may approximate this one minute smoothing period if necessary.
+# Syntaxe	Integer32 (0...100)
+
+declare -a CPULOADS
+CPULOADS=( $(snmpwalk -v2c -Ovq -c $COMMUNITY $HOST_NAME .1.3.6.1.2.1.25.3.3.1.2 2>/dev/null | tr -d "\"" ) )
+
+#printf '%s\n' "${CPULOADS[@]}" #DEBUG
+
+if [ $? -eq 0 ]; then
+	#echo ${CPULOADS[*]}
+	LOADSUM=0
+	CORECOUNT=0
+	CORECOUNT=${#CPULOADS[*]}
+
+	if [ $CORECOUNT -lt 1 ]; then
+	   EXIT_STRING="UNKNOWN - No CPU found. Host does not appear to support this OID."
+	   return $EXIT_CODE_UNKNOWN
+	fi
+
+	COUNTER=0
+	until [  $COUNTER -ge $CORECOUNT ]; do
+		ADD=${CPULOADS[$COUNTER]}
+		#echo $LOADSUM ". +" $ADD ".." #DEBUG
+		LOADSUM=$(($LOADSUM + $ADD))
+		#echo $LOADSUM "..." #DEBUG
+		let COUNTER+=1
+	done	
+
+	LOADAVERANGE=$(($LOADSUM / $CORECOUNT))
+
+	#DEBUG
+	#echo "Cores: $CORECOUNT"
+	#echo "LOADSUM: $LOADSUM"
+	#echo "CPU-Load: $LOADAVERANGE"
+	#DEBUG ENDE
+	
+	if [ $LOADAVERANGE -ge $WARNING ]; then
+		EXIT_STRING=$(echo "Warning (W: >= $WARNING %) - Current value: $LOADAVERANGE %")
+		return $EXIT_CODE_WARN
+	else
+			if [ $LOADAVERANGE -ge $CRITICAL ]; then
+				EXIT_STRING=$(echo "Error (C: >= $CRITICAL %) - Current value: $LOADAVERANGE %")
+				return $EXIT_CODE_CRIT
+			else
+				EXIT_STRING=$(echo "OK (W: >= $WARNING % - C: >= $CRITICAL %) - Current value: $LOADAVERANGE %")
+				return $EXIT_CODE_OK
+			fi
+	fi	
+	
+else
+	# Something happened or this OID isn't available
+	EXIT_STRING="UNKNOWN - does not appear to support using this OID."
+	return $EXIT_CODE_UNKNOWN
+fi
+}
+
+
+#########################################################
+##                      MAIN CODE                      ##
+#########################################################
+
+# Check that all required binaries for the script are available
+#       EXIT with an UNKNOWN status if not
+binaries="snmpwalk snmpget bc egrep xxd"
+
+for required_binary in $binaries;
+do
+        which $required_binary > /dev/null
+        if [ "$?" != '0' ];then
+                printf "UNKNOWN: $APPNAME: No usable '$required_binary' binary in '$PATH'\n"
+                exit 3
+        fi
+done
+
+# Parse our options as passed, and make sure things are peachy
+while getopts "C:H:c:w:x:S:hV" OPTION;
+do
+#DEBUG
+#printf "Option $OPTION => $OPTARG \n"
+#DEBUG ENDE
+        case $OPTION in
+                "C") # Assign community
+                        COMMUNITY="$OPTARG"
+                ;;
+                "H") # Assign hostname
+                        HOST_NAME="$OPTARG"
+                ;;
+                "c") # Assign CRITICAL threshold
+                        CRITICAL="$OPTARG"
+                ;;
+                "w") # Assign WARNING threshold
+                        WARNING="$OPTARG"
+                ;;
+                "x") # Assign check to perform
+						#echo $OPTARG #DEBUG
+                        CHECK=$(echo "$OPTARG" | cut -d " " -f1)
+                        PARAMETER=$(echo "$OPTARG" | cut -d " " -f2-)
+                ;;
+                "S") # Assign separator
+                        SEPARATOR="$OPTARG"
+                ;;
+                "h") # Print application help
+                        print_help
+                        exit $?
+                ;;
+                "V") # Print application version
+                        printf "$APPNAME - version $VERSION\n"
+                        exit $EXIT_CODE
+                ;;
+        esac
+done
+
+#DEBUG
+#printf "Option Check => $CHECK \n"
+#printf "Option Parameter => $PARAMETER \n"
+#DEBUG ENDE
+
+
+# Make sure all necessary arguments were given; EXIT with an UNKNOWN status if not
+if [ -z "$COMMUNITY" ] || [ -z "$HOST_NAME" ];then
+        # we need these parameters to continue
+        EXIT_STRING="UNKNOWN: Hostname and/or Community variables have not been set!\n"
+        EXIT_CODE=$EXIT_CODE_UNKNOWN
+else
+        ALL_MARKERS=$(snmpwalk -v2c -On -c $COMMUNITY $HOST_NAME 2>/dev/null)
+        if [ $? -ne 0 ]; then
+                #Check for server response - is SNMP even setup okay?
+                EXIT_STRING="WARNING: No SNMP response from $HOST_NAME! Make sure host is up and SNMP is configured properly.\n"
+                EXIT_CODE=$EXIT_CODE_UNKNOWN
+
+		else
+                STRING_TYPE=$(echo "$ALL_MARKERS" | tr -d "\n" | cut -d " " -f3)
+                #DEBUG
+				#printf "Check: >> $CHECK  << \n"  
+				#printf "Community: $COMMUNITY \n"
+				#printf "Warning: $WARNING \n"
+				#printf "Critical: $CRITICAL \n"
+				#DEBUG ENDE
+		case "$CHECK" in
+                        "CPULOAD")
+                                check_cpuload #"$PARAMETER"
+                                ;;
+						"RAMFREE")
+								check_ramfreemb
+								;;
+						"RAMFREEPERCENT")
+								check_ramfreeperc
+								;;
+						"DISKFREE")
+								check_diskfree $PARAMETER
+								;;
+                        *) # no parameters were passed, or a parameter was incorrect (wrong spelling, etc.)
+                                echo 'Invalid check specified by -x parameter.'
+                                echo ''
+                                print_help
+				EXIT_CODE=$EXIT_CODE_UNKNOWN
+                                ;;
+                esac
+
+                EXIT_CODE=$?
+        fi
+fi
+
+echo $EXIT_STRING
+exit $EXIT_CODE
+
