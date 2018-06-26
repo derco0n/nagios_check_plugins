@@ -4,8 +4,8 @@
 #		SNMP Server Check								#
 #														#
 # check_snmp_server										#
-# 	Version 0.5 (June 22, 2018)							#
-#		by D.Marx										#
+# 	Version 0.6 (June 26, 2018)							#
+#		by D.Marx									#
 #														#
 #	kleines Tool um Server per SNMP abzufragen			#
 #														#
@@ -26,7 +26,7 @@
 
 
 APPNAME=$(basename $0)
-VERSION="0.5"
+VERSION="0.6"
 COMMUNITY="public"
 
 EXIT_CODE_OK=0
@@ -72,6 +72,8 @@ function print_help {
 	printf "RAMFREEPERCENT			- returns Free RAM in Percent\n"
 	printf "RAMFREE					- returns Free RAM in MBytes\n"
 	printf "\"DISKFREE <DRIVE>\" 	- returns Free Diskspace in Percent\n"
+	printf "\"PROCCOUNTLT <NAME>\" 	- returns Count of running instances of a Process (W/C lower than)\n"
+	printf "\"PROCCOUNTGE <NAME>\" 	- returns Count of running instances of a Process (W/C greater equal)\n"
 	printf "							Example: check_snmp_server -H 192.168.0.1 -C public -x \"DISKFREE C:\""
 	printf "\n"
 return $EXIT_CODE_UNKNOWN
@@ -253,6 +255,90 @@ function check_ramtotal(){
 		# Something happened or this OID isn't available		
 		LAST_RETURN_VALUE=-1
 	fi
+}
+
+function check_processcount(){
+	#Ermittelt die die Anzahl der laufenden Instanzen eines Prozesses
+	#OID .1.3.6.1.2.1.25.4.2.1.2	
+	SEARCHPROC=$1
+	
+	declare -a PROCESSLIST
+	
+	#Eine Liste aller laufenden Prozesse mit ihrem jeweiligen RAM-Verbrauch holen
+	PROCESSES=( $(snmpwalk -v2c -Ovq -c $COMMUNITY $HOST_NAME .1.3.6.1.2.1.25.4.2.1.2 2>/dev/null | tr -d "\" " ) )
+		
+	TOTALPROCCOUNT=0 #ANzahl aller Prozesse
+	TOTALPROCCOUNT=${#PROCESSES[*]}
+	PROCINSTCOUNT=0 #Anzahl der Prozessinstanz
+	COUNTER=0 #Zähler
+	
+	#echo "Search for $SEARCHPROC" #debug
+	
+	#Die jeweiligen RAM-Verbräuche der einzelnen Prozesse aufsummieren
+	until [  $COUNTER -ge $TOTALPROCCOUNT ]; do
+		#echo "Counter: $COUNTER" #DEBUG
+		CURPROC=${PROCESSES[$COUNTER]}	
+		#echo "Proc: $CURPROC" #DEBUG
+		if [ "$CURPROC" == "$SEARCHPROC" ]; then
+			#echo "Found" #Debug
+			let PROCINSTCOUNT+=1
+		fi
+		
+		let COUNTER+=1
+	done	
+	
+	#echo "Count= $PROCINSTCOUNT" #debug
+	
+	if [ $? -eq 0 ]; then	
+		
+		#RAMUSEDMB="scale=2 ; $TOTALKBUSAGE / 1024" | bc
+		#echo "Used:" $TOTALKBUSAGE #DEBUG
+		#return $RAMUSEDMB
+		LAST_RETURN_VALUE=$PROCINSTCOUNT
+	
+	else
+		# Something happened or this OID isn't available		
+		LAST_RETURN_VALUE=-1
+	fi
+}
+
+function check_processcountlt() {
+	#Prüft die Prozessanzahl (kleiner als...)
+	check_processcount $1 #Funktion mit Parametern aufrufen
+	PROCRUNSCOUNT=$LAST_RETURN_VALUE
+	#echo "Count: $PROCRUNSCOUNT" #DEBUG
+	if [ $PROCRUNSCOUNT -lt $CRITICAL ]; then
+			EXIT_STRING=$(echo "Critical (C: < $CRITICAL#) - Current value: $PROCRUNSCOUNT#")
+		
+		return $EXIT_CODE_CRIT
+	else
+		if [ $PROCRUNSCOUNT -lt $WARNING ]; then
+			EXIT_STRING=$(echo "Warning (W: < $WARNING#) - Current value: $PROCRUNSCOUNT#")
+			return $EXIT_CODE_WARN
+		else
+			EXIT_STRING=$(echo "OK (W: < $WARNING# - C: <= $CRITICAL #) - Current value: $PROCRUNSCOUNT#")
+			return $EXIT_CODE_OK
+		fi
+	fi	
+}
+
+function check_processcountge() {
+	#Prüft die Prozessanzahl (größer ...)
+	check_processcount $1 #Funktion mit Parametern aufrufen
+	PROCRUNSCOUNT=$LAST_RETURN_VALUE
+	#echo "Count: $PROCRUNSCOUNT" #DEBUG
+	if [ $PROCRUNSCOUNT -ge $CRITICAL ]; then
+		EXIT_STRING=$(echo "Critical (C: >= $CRITICAL#) - Current value: $PROCRUNSCOUNT#")
+		return $EXIT_CODE_CRIT
+	else
+		if [ $PROCRUNSCOUNT -ge $WARNING ]; then
+			EXIT_STRING=$(echo "Warning (W: >= $WARNING#) - Current value: $PROCRUNSCOUNT#")
+			return $EXIT_CODE_WARN
+		else
+			EXIT_STRING=$(echo "OK (W: >= $WARNING# - C: >= $CRITICAL #) - Current value: $PROCRUNSCOUNT#")
+			return $EXIT_CODE_OK
+		fi
+	fi	
 }
 
 function check_ramused(){
@@ -510,14 +596,15 @@ if [ -z "$COMMUNITY" ] || [ -z "$HOST_NAME" ];then
         EXIT_STRING="UNKNOWN: Hostname and/or Community variables have not been set!\n"
         EXIT_CODE=$EXIT_CODE_UNKNOWN
 else
-        ALL_MARKERS=$(snmpwalk -v2c -On -c $COMMUNITY $HOST_NAME 2>/dev/null)
+        #ALL_MARKERS=$(snmpwalk -v2c -On -c $COMMUNITY $HOST_NAME 2>/dev/null)
+		ALL_MARKERS=$(snmpwalk -v2c -On -c $COMMUNITY $HOST_NAME iso.3.6.1.2.1.1.1 2>/dev/null) #returns the hardware description		
         if [ $? -ne 0 ]; then
                 #Check for server response - is SNMP even setup okay?
                 EXIT_STRING="WARNING: No SNMP response from $HOST_NAME! Make sure host is up and SNMP is configured properly.\n"
                 EXIT_CODE=$EXIT_CODE_UNKNOWN
 
 		else
-                STRING_TYPE=$(echo "$ALL_MARKERS" | tr -d "\n" | cut -d " " -f3)
+                #STRING_TYPE=$(echo "$ALL_MARKERS" | tr -d "\n" | cut -d " " -f3)
                 #DEBUG
 				#printf "Check: >> $CHECK  << \n"  
 				#printf "Community: $COMMUNITY \n"
@@ -536,6 +623,12 @@ else
 								;;
 						"DISKFREE")
 								check_diskfree $PARAMETER
+								;;
+						"PROCCOUNTLT")
+								check_processcountlt $PARAMETER
+								;;
+						"PROCCOUNTGE")
+								check_processcountge $PARAMETER
 								;;
                         *) # no parameters were passed, or a parameter was incorrect (wrong spelling, etc.)
                                 echo 'Invalid check specified by -x parameter.'
